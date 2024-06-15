@@ -1,6 +1,11 @@
 #ifndef LOGGER_H
-#define SERVER_URL "esplogger.tech"
-#define TIME_PATH "/api/v1/time"
+#define SERVER_URL F("esplogger.tech")
+#define TIME_PATH F("/api/v1/time")
+#define MAX_INTERVAL 3600
+#define MIN_INTERVAL 60
+#define MAX_SENSOR_INTERVAL 1800
+#define MIN_SENSOR_INTERVAL 5
+#define ONE_DAY 86400000UL
 #define LOGGER_H
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -15,27 +20,37 @@ class ESPLogger;
 class Sensor
 {
 public:
-  Sensor(String name = "", String unit = "", String type = "", float (*callback)() = nullptr)
+  Sensor(const String &name = "", const String &unit = "", const String &type = "", float (*callback)() = nullptr)
   {
     _name = name;
     _unit = unit;
     _type = type;
     _callback = callback;
-    _sensor["name"] = _name;
-    _sensor["unit"] = _unit;
-    _sensor["sensor_type"] = _type;
+    _sensor[F("name")] = _name;
+    _sensor[F("unit")] = _unit;
+    _sensor[F("sensor_type")] = _type;
   }
 
   float getValue()
   {
-    Serial.printf("Getting value for sensor: %s\n", _name.c_str());
+    esp_task_wdt_reset();
+    // Serial.printf("Getting value for sensor: %s\n", _name.c_str());
     if (_callback)
     {
       _value = _callback();
-      Serial.printf("Value: %f\n", _value);
+      // Serial.printf("Value: %f\n", _value);
       return _value;
     }
     return 0;
+  }
+  String diagnostic()
+  {
+    String output;
+    output += _name + F(":  ");
+    output += String(getValue());
+    output += F(" ");
+    output += _unit;
+    return output;
   }
   String getName()
   {
@@ -53,21 +68,21 @@ public:
 protected:
   template <int NumSensors>
   friend class ESPLogger;
-  void run(uint32_t timestamp = 0)
+  void run(u32_t timestamp = 0)
   {
     _value = getValue();
     JsonDocument sensorValue;
-    sensorValue["value"] = _value;
-    sensorValue["timestamp"] = timestamp;
+    sensorValue[F("value")] = _value;
+    sensorValue[F("timestamp")] = timestamp;
     _sensorValues.add(sensorValue);
-    String output;
-    serializeJson(_sensorValues, output);
-    Serial.printf("Sensor values: %s\n", output.c_str());
+    // String output;
+    // serializeJson(_sensorValues, output);
+    // Serial.printf("Sensor values: %s\n", output.c_str());
   }
   JsonDocument getJson()
   {
     JsonDocument doc = _sensor;
-    doc["sensor_values"] = _sensorValues;
+    doc[F("sensor_values")] = _sensorValues;
     // Display the JSON document
     _sensorValues.clear();
     return doc;
@@ -90,24 +105,28 @@ public:
 
   // - secure: Whether to use HTTPS or HTTP (default is true)
   // - url: The URL of the server (default is SERVER_URL)
-  ESPLogger(bool secure = true, String url = SERVER_URL)
+  ESPLogger(bool secure = true, const String &url = SERVER_URL)
   {
+    _apiKey.reserve(40);
+    _url.reserve(40);
+    _timeUrl.reserve(40);
     _secure = secure;
     _setUrl(url);
     _http = new HTTPClient;
     _deviceId = ESP.getEfuseMac();
     _device["device_id"] = _deviceId;
-    setGroup("Default");
-    setDeviceName("ESP32");
-    _deviceSensors = _device["sensors"].to<JsonArray>();
+    setGroup(F("Default"));
+    setDeviceName(F("ESP32"));
+    _deviceSensors = _device[F("sensors")].to<JsonArray>();
   }
+
   // Call init to start the logger after connecting to wifi
   // - api_key: The API key for the logger
   // - deviceName: The name of the device
   // - group: The group name for the device (default is "Default")
   // - sensorReadInterval: The interval in seconds to read sensor values (minimum is 5 seconds)
   // - logInterval: The interval in seconds to log sensor values (minimum is 60 seconds)
-  bool init(String api_key, String deviceName, String group = "Default", uint32_t sensorReadInterval = 5, uint32_t logInterval = 60)
+  bool init(const String &api_key, const String &deviceName = F("ESP32"), const String &group = F("Default"), u32_t sensorReadInterval = 5, u32_t logInterval = 60)
   {
     setDeviceName(deviceName);
     setGroup(group);
@@ -124,11 +143,16 @@ public:
     {
       return false;
     }
+    if (!getUnix())
+    {
+      _syncTime();
+      return false;
+    }
     _updateSensors();
     if (getUnix() - _lastLog > _logInterval)
     {
       _lastLog = getUnix();
-      Serial.println("Logging data");
+      // Serial.println("Logging data");
       for (int i = 0; i < NumSensors; i++)
       {
         if (_sensors[i])
@@ -136,20 +160,29 @@ public:
           _deviceSensors.add(_sensors[i]->getJson());
         }
       }
-      // Return if no sensors were added
-      if (_deviceSensors.size() == 0)
-      {
-        Serial.println("No sensors added");
-        return false;
-      }
       if (_sendData())
       {
         _lastLog = getUnix();
-        _deviceSensors.clear();
         return true;
       }
     }
     return false;
+  }
+  String sensorsDiagnostic()
+  {
+    String output = F("");
+    for (int i = 0; i < NumSensors; i++)
+    {
+      if (_sensors[i])
+      {
+        output += _sensors[i]->diagnostic() + F("\n");
+      }
+    }
+    return output;
+  }
+  bool addSensor(const String &name, const String &unit, const String &type, float (*callback)())
+  {
+    return addSensor(Sensor(name, unit, type, callback));
   }
   bool addSensor(Sensor &sensor)
   {
@@ -163,45 +196,41 @@ public:
     }
     return false;
   }
-  void setTransmitting(bool transmitting)
+  void setSensorReadInterval(u32_t sensorReadInterval)
   {
-    _transmitting = transmitting;
+    _sensorReadInterval = max(min((int)sensorReadInterval, MAX_SENSOR_INTERVAL), MIN_SENSOR_INTERVAL);
   }
-  bool addSensor(String name, String unit, String type, float (*callback)())
+  void setLogInterval(u32_t logInterval)
   {
-    return addSensor(Sensor(name, unit, type, callback));
+    _logInterval = max(min((int)logInterval, MAX_INTERVAL), MIN_INTERVAL);
   }
-  void setSensorReadInterval(uint32_t sensorReadInterval)
+  void setDeviceName(const String &deviceName)
   {
-    _sensorReadInterval = min((int)sensorReadInterval, 60000);
-  }
-  void setLogInterval(uint32_t logInterval)
-  {
-    _logInterval = min((int)logInterval, 60000);
-  }
-  void setDeviceName(String deviceName)
-  {
-    _device["device_name"] = deviceName;
+    _device[F("device_name")] = deviceName;
     _deviceName = deviceName;
   }
-  void setGroup(String group)
+  void setGroup(const String &group)
   {
-    _device["group_name"] = group;
+    _device[F("group_name")] = group;
     _deviceGroup = group;
   }
   u_int32_t getUnix()
   {
     if (_unix)
     {
-      uint32_t diff = millis() - _lastUnix;
+      u32_t diff = millis() - _lastUnix;
       if (_unix && diff > 86400000ul)
       {
         _unix += diff / 1000ul;
         _lastUnix = millis() - diff % 1000ul;
       }
-      return _unix + (millis() - _lastUnix) / 1000ul;
+      return (_unix + (millis() - _lastUnix) / 1000ul);
     }
     return 0;
+  }
+  void setTransmitting(bool transmitting)
+  {
+    _transmitting = transmitting;
   }
   void stop()
   {
@@ -216,7 +245,7 @@ private:
   Sensor *_sensors[NumSensors];
   JsonDocument _device;
   JsonArray _deviceSensors;
-  u_int64_t _deviceId;
+  u64_t _deviceId;
   HTTPClient *_http = nullptr;
   String _deviceGroup;
   String _deviceName;
@@ -225,26 +254,35 @@ private:
   String _apiKey;
   bool _secure;
   bool _transmitting = false;
-  uint32_t _unix = 0;
-  uint32_t _lastUnix = 0;
-  uint32_t _logInterval;
-  uint32_t _sensorReadInterval;
+  u32_t _unix = 0;
+  u32_t _lastUnix = 0;
+  u32_t _logInterval;
+  u32_t _sensorReadInterval;
   u16_t _sensorIntervalOffset = 0;
-  uint32_t _lastSensorTimeStamp = 0;
-  uint32_t _lastSensorRead = 0;
-  uint32_t _lastLog = 0;
+  u32_t _lastSensorTimeStamp = 0;
+  u32_t _lastSensorRead = 0;
+  u32_t _lastLog = 0;
+  void _resetJSON()
+  {
+    _deviceSensors.clear();
+    _device.clear();
+    _device[F("device_id")] = _deviceId;
+    _device[F("device_name")] = _deviceName;
+    _device[F("group_name")] = _deviceGroup;
+    _deviceSensors = _device[F("sensors")].to<JsonArray>();
+  }
   void _updateSensors()
   {
     if (getUnix() - _lastSensorRead > _sensorReadInterval - _sensorIntervalOffset)
     {
-      Serial.println("Reading sensor values");
+      // Serial.println("Reading sensor values");
       u32_t timestamp = getUnix();
       int diff = (((int)timestamp - (int)_lastSensorTimeStamp) - (int)_sensorReadInterval);
       if (_lastSensorTimeStamp && diff)
       {
         _sensorIntervalOffset = max((int)0, diff);
       }
-      Serial.printf("Reading sensors on Timestamp: %u\n", timestamp);
+      // Serial.printf("Reading sensors on Timestamp: %u\n", timestamp);
       for (int i = 0; i < NumSensors; i++)
       {
         if (_sensors[i])
@@ -258,64 +296,52 @@ private:
   }
   bool _sendData()
   {
-    WiFiClientSecure client;
-    client.setInsecure();
-    _http->begin(client, _url);
-    _http->addHeader("Content-Type", "application/json");
-    _http->addHeader("Authorization", _apiKey);
+    // Serial.printf("Sending data\n");
+    _http->begin( _url);
+    _http->addHeader(F("Content-Type"), F("application/json"));
+    _http->addHeader(F("Authorization"), _apiKey);
     String payload;
     serializeJson(_device, payload);
-    Serial.printf("Payload: %s\n", payload.c_str());
+    esp_task_wdt_reset();
+    _resetJSON();
     int httpCode = _http->POST(payload);
-    Serial.printf("HTTP Code: %d\n", httpCode);
+    // Serial.printf("Send data HTTP Code: %d\n", httpCode);
     if (httpCode == 201)
     {
-      payload = _http->getString(); // {unix_time: 123456789}
-      Serial.printf("Payload: %s\n", payload.c_str());
-      if (millis() - _lastUnix > 86400000ul)
-      {
-        JsonDocument doc;
-        deserializeJson(doc, payload);
-        _unix = doc["unix_time"];
-        _lastUnix = millis();
-      }
+      if (millis() - _lastUnix > ONE_DAY)
+        _syncTime();
       _http->end();
       return true;
     }
     else
     {
-      String payload = _http->getString();
-      JsonDocument errorMsg;
-      deserializeJson(errorMsg, payload);
-      String error = errorMsg["errors"];
-      Serial.printf("Error: %s\n", error.c_str());
       _http->end();
       return false;
     }
   }
   bool _syncTime()
   {
-    Serial.printf("Syncing time\n");
+    // Serial.printf("Syncing time\n");
     //  WiFiClient client;
-    WiFiClientSecure client;
-    client.setInsecure();
-    Serial.printf("Connecting to: %s\n", _timeUrl.c_str());
-    _http->begin(client, _timeUrl);
-    Serial.printf("Adding headers\n");
-    _http->addHeader("Content-Type", "application/json");
-    _http->addHeader("Authorization", _apiKey);
+    // Serial.printf("Connecting to: %s\n", _timeUrl.c_str());
+    _http->begin(_timeUrl);
+    // Serial.printf("Adding headers\n");
+    _http->addHeader(F("Content-Type"), F("application/json"));
+    _http->addHeader(F("Authorization"), _apiKey);
     // Json format -> {unix_time: 123456789}
+    esp_task_wdt_reset();
     int httpCode = _http->GET();
-    Serial.printf("HTTP Code: %d\n", httpCode);
+    // Serial.printf("Sync time HTTP Code: %d\n", httpCode);
     if (httpCode == 200)
     {
       String payload = _http->getString();
-      Serial.printf("Payload: %s\n", payload.c_str());
+
+      // Serial.printf("Payload: %s\n", payload.c_str());
       JsonDocument doc;
-      Serial.printf("Deserializing\n");
+      // Serial.printf("Deserializing\n");
       deserializeJson(doc, payload);
-      Serial.printf("Deserialized\n");
-      _unix = doc["unix_time"];
+      // Serial.printf("Deserialized\n");
+      _unix = doc[F("unix_time")];
       _lastUnix = millis();
       _lastLog = _unix;
       _lastSensorRead = _unix;
@@ -328,17 +354,21 @@ private:
       return false;
     }
   }
-  void _setUrl(String url)
+  void _setUrl(const String &url)
   {
     if (_secure)
     {
-      _url = "https://" + url + "/api/v1/log";
-      _timeUrl = "https://" + url + TIME_PATH;
+      _url = F("https://");
+      _url += url + F("/api/v1/log");
+      _timeUrl = F("https://");
+      _timeUrl += url + TIME_PATH;
     }
     else
     {
-      _url = "http://" + url + "/api/v1/log";
-      _timeUrl = "http://" + url + TIME_PATH;
+      _url = F("http://");
+      _url += url + F("/api/v1/log");
+      _timeUrl = F("http://");
+      _timeUrl += url + TIME_PATH;
     }
   }
 };
