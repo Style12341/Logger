@@ -1,10 +1,26 @@
 #ifndef LOGGER_H
+#define DEBUG_LOGGER 1 // SET TO 0 OUT TO REMOVE TRACES
+
+#if DEBUG_LOGGER
+#define DL_SerialBegin(...) Serial.begin(__VA_ARGS__);
+#define DL_print(...) Serial.print(__VA_ARGS__)
+#define DL_write(...) Serial.write(__VA_ARGS__)
+#define DL_println(...) Serial.println(__VA_ARGS__)
+#define DL_printf(...) Serial.printf(__VA_ARGS__)
+#else
+#define DL_SerialBegin(...)
+#define DL_print(...)
+#define DL_write(...)
+#define DL_println(...)
+#define DL_printf(...)
+#endif
+
 #define SERVER_URL F("esplogger.tech")
 #define TIME_PATH F("/api/v1/time")
 #define MAX_INTERVAL 3600
 #define MIN_INTERVAL 60
 #define MAX_SENSOR_INTERVAL 1800
-#define MIN_SENSOR_INTERVAL 5
+#define MIN_SENSOR_INTERVAL 10
 #define ONE_DAY 86400000UL
 #define LOGGER_H
 #include <Arduino.h>
@@ -33,12 +49,11 @@ public:
 
   float getValue()
   {
-    esp_task_wdt_reset();
-    // Serial.printf("Getting value for sensor: %s\n", _name.c_str());
+    DL_printf("Getting value for sensor: %s\n", _name.c_str());
     if (_callback)
     {
       _value = _callback();
-      // Serial.printf("Value: %f\n", _value);
+      DL_printf("Value: %f\n", _value);
       return _value;
     }
     return 0;
@@ -77,7 +92,7 @@ protected:
     _sensorValues.add(sensorValue);
     // String output;
     // serializeJson(_sensorValues, output);
-    // Serial.printf("Sensor values: %s\n", output.c_str());
+    // DL_printf("Sensor values: %s\n", output.c_str());
   }
   JsonDocument getJson()
   {
@@ -126,7 +141,7 @@ public:
   // - group: The group name for the device (default is "Default")
   // - sensorReadInterval: The interval in seconds to read sensor values (minimum is 5 seconds)
   // - logInterval: The interval in seconds to log sensor values (minimum is 60 seconds)
-  bool init(const String &api_key, const String &deviceName = F("ESP32"), const String &group = F("Default"), u32_t sensorReadInterval = 5, u32_t logInterval = 60)
+  bool init(const String &api_key, const String &deviceName = F("ESP32"), const String &group = F("Default"), u32_t sensorReadInterval = 30, u32_t logInterval = 60)
   {
     setDeviceName(deviceName);
     setGroup(group);
@@ -139,7 +154,7 @@ public:
   // Call tick in your loop to log sensor values
   bool tick()
   {
-    if (!_transmitting or !getUnix())
+    if (!_transmitting)
     {
       return false;
     }
@@ -152,7 +167,7 @@ public:
     if (getUnix() - _lastLog > _logInterval)
     {
       _lastLog = getUnix();
-      // Serial.println("Logging data");
+      DL_println("Logging data");
       for (int i = 0; i < NumSensors; i++)
       {
         if (_sensors[i])
@@ -200,9 +215,17 @@ public:
   {
     _sensorReadInterval = max(min((int)sensorReadInterval, MAX_SENSOR_INTERVAL), MIN_SENSOR_INTERVAL);
   }
+  u32_t getSensorReadInterval()
+  {
+    return _sensorReadInterval;
+  }
   void setLogInterval(u32_t logInterval)
   {
     _logInterval = max(min((int)logInterval, MAX_INTERVAL), MIN_INTERVAL);
+  }
+  u32_t getLogInterval()
+  {
+    return _logInterval;
   }
   void setDeviceName(const String &deviceName)
   {
@@ -238,6 +261,8 @@ public:
   }
   void start()
   {
+    _lastLog = getUnix();
+    _lastSensorRead = getUnix();
     _transmitting = true;
   }
 
@@ -275,14 +300,14 @@ private:
   {
     if (getUnix() - _lastSensorRead > _sensorReadInterval - _sensorIntervalOffset)
     {
-      // Serial.println("Reading sensor values");
+      DL_println("Reading sensor values");
       u32_t timestamp = getUnix();
       int diff = (((int)timestamp - (int)_lastSensorTimeStamp) - (int)_sensorReadInterval);
       if (_lastSensorTimeStamp && diff)
       {
-        _sensorIntervalOffset = max((int)0, diff);
+        _sensorIntervalOffset = min(max((int)0, diff), 5);
       }
-      // Serial.printf("Reading sensors on Timestamp: %u\n", timestamp);
+      DL_printf("Reading sensors on Timestamp: %u\n", timestamp);
       for (int i = 0; i < NumSensors; i++)
       {
         if (_sensors[i])
@@ -296,16 +321,16 @@ private:
   }
   bool _sendData()
   {
-    // Serial.printf("Sending data\n");
-    _http->begin( _url);
+    DL_printf("Sending data\n");
+    _http->begin(_url);
     _http->addHeader(F("Content-Type"), F("application/json"));
     _http->addHeader(F("Authorization"), _apiKey);
     String payload;
     serializeJson(_device, payload);
-    esp_task_wdt_reset();
+    
     _resetJSON();
     int httpCode = _http->POST(payload);
-    // Serial.printf("Send data HTTP Code: %d\n", httpCode);
+    DL_printf("Send data HTTP Code: %d\n", httpCode);
     if (httpCode == 201)
     {
       if (millis() - _lastUnix > ONE_DAY)
@@ -321,26 +346,31 @@ private:
   }
   bool _syncTime()
   {
-    // Serial.printf("Syncing time\n");
+    // If WiFi mode is set to AP return false
+    if (WiFi.getMode() == WIFI_AP)
+    {
+      return false;
+    }
+    DL_printf("Syncing time\n");
     //  WiFiClient client;
-    // Serial.printf("Connecting to: %s\n", _timeUrl.c_str());
+    DL_printf("Connecting to: %s\n", _timeUrl.c_str());
     _http->begin(_timeUrl);
-    // Serial.printf("Adding headers\n");
+    DL_printf("Adding headers\n");
     _http->addHeader(F("Content-Type"), F("application/json"));
     _http->addHeader(F("Authorization"), _apiKey);
     // Json format -> {unix_time: 123456789}
-    esp_task_wdt_reset();
+    
     int httpCode = _http->GET();
-    // Serial.printf("Sync time HTTP Code: %d\n", httpCode);
+    DL_printf("Sync time HTTP Code: %d\n", httpCode);
     if (httpCode == 200)
     {
       String payload = _http->getString();
 
-      // Serial.printf("Payload: %s\n", payload.c_str());
+      DL_printf("Payload: %s\n", payload.c_str());
       JsonDocument doc;
-      // Serial.printf("Deserializing\n");
+      DL_printf("Deserializing\n");
       deserializeJson(doc, payload);
-      // Serial.printf("Deserialized\n");
+      DL_printf("Deserialized\n");
       _unix = doc[F("unix_time")];
       _lastUnix = millis();
       _lastLog = _unix;
