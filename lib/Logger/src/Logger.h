@@ -335,6 +335,7 @@ private:
 
     if (httpCode == 201)
     {
+      retries = 0;
       if (millis() - _lastUnix > ONE_DAY)
         _syncTime();
       _http->end();
