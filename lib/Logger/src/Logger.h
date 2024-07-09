@@ -49,6 +49,7 @@ public:
 
   float getValue()
   {
+
     DL_printf("Getting value for sensor: %s\n", _name.c_str());
     if (_callback)
     {
@@ -175,7 +176,9 @@ public:
           _deviceSensors.add(_sensors[i]->getJson());
         }
       }
-      if (_sendData())
+      String payload;
+      serializeJson(_device, payload);
+      if (_sendData(payload))
       {
         _lastLog = getUnix();
         return true;
@@ -319,18 +322,17 @@ private:
       _lastSensorRead = getUnix();
     }
   }
-  bool _sendData()
+  bool _sendData(const String &payload)
   {
-    DL_printf("Sending data\n");
+    static int retries = 0;
+    DL_printf("Sending data try: %i\n", retries);
     _http->begin(_url);
     _http->addHeader(F("Content-Type"), F("application/json"));
     _http->addHeader(F("Authorization"), _apiKey);
-    String payload;
-    serializeJson(_device, payload);
-    
     _resetJSON();
     int httpCode = _http->POST(payload);
     DL_printf("Send data HTTP Code: %d\n", httpCode);
+
     if (httpCode == 201)
     {
       if (millis() - _lastUnix > ONE_DAY)
@@ -341,7 +343,16 @@ private:
     else
     {
       _http->end();
-      return false;
+      if (retries < 3)
+      {
+        retries++;
+        return _sendData(payload);
+      }
+      else
+      {
+        retries = 0;
+        return false;
+      }
     }
   }
   bool _syncTime()
@@ -359,7 +370,7 @@ private:
     _http->addHeader(F("Content-Type"), F("application/json"));
     _http->addHeader(F("Authorization"), _apiKey);
     // Json format -> {unix_time: 123456789}
-    
+
     int httpCode = _http->GET();
     DL_printf("Sync time HTTP Code: %d\n", httpCode);
     if (httpCode == 200)
