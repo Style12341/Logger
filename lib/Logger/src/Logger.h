@@ -14,7 +14,7 @@
 #define DL_println(...)
 #define DL_printf(...)
 #endif
-
+#define UPDATE_URL(DEVICE_ID) ("https://esplogger.tech/api/v1/firmwares/latest/" + DEVICE_ID)
 #define SERVER_URL F("esplogger.tech")
 #define TIME_PATH F("/api/v1/time")
 #define MAX_INTERVAL 3600
@@ -124,13 +124,14 @@ public:
   ESPLogger(bool secure = true, const String &url = SERVER_URL)
   {
     _apiKey.reserve(40);
-    _url.reserve(40);
+    _logUrl.reserve(40);
     _timeUrl.reserve(40);
     _secure = secure;
     _setUrl(url);
     _http = new HTTPClient;
     _deviceId = ESP.getEfuseMac();
     _device["device_id"] = _deviceId;
+    setFirmwareVersion(F("1.0"));
     setGroup(F("Default"));
     setDeviceName(F("ESP32"));
     _deviceSensors = _device[F("sensors")].to<JsonArray>();
@@ -142,8 +143,9 @@ public:
   // - group: The group name for the device (default is "Default")
   // - sensorReadInterval: The interval in seconds to read sensor values (minimum is 5 seconds)
   // - logInterval: The interval in seconds to log sensor values (minimum is 60 seconds)
-  bool init(const String &api_key, const String &deviceName = F("ESP32"), const String &group = F("Default"), u32_t sensorReadInterval = 30, u32_t logInterval = 60)
+  bool init(const String &api_key, const String &deviceName = F("ESP32"), const String &group = F("Default"), const String &firmwareVersion = F("1.0"), u32_t sensorReadInterval = 30, u32_t logInterval = 60)
   {
+    setFirmwareVersion(firmwareVersion);
     setDeviceName(deviceName);
     setGroup(group);
     _apiKey = "Bearer " + api_key;
@@ -230,6 +232,15 @@ public:
   {
     return _logInterval;
   }
+  void setFirmwareVersion(const String &version)
+  {
+    _device[F("firmware_version")] = version;
+    _firmwareVersion = version;
+  }
+  String getFirmwareVersion()
+  {
+    return _firmwareVersion;
+  }
   void setDeviceName(const String &deviceName)
   {
     _device[F("device_name")] = deviceName;
@@ -268,18 +279,30 @@ public:
     _lastSensorRead = getUnix();
     _transmitting = true;
   }
+  void setOnUpdate(void (*callback)())
+  {
+    _update_started = callback;
+  }
+  void setOnUpdateFinished(void (*callback)())
+  {
+    _update_finished = callback;
+  }
 
 private:
   Sensor *_sensors[NumSensors];
+  void (*_update_started)() = nullptr;
+  void (*_update_finished)() = nullptr;
   JsonDocument _device;
   JsonArray _deviceSensors;
   u64_t _deviceId;
   HTTPClient *_http = nullptr;
   String _deviceGroup;
   String _deviceName;
-  String _url;
+  String _logUrl;
   String _timeUrl;
+  String _url;
   String _apiKey;
+  String _firmwareVersion;
   bool _secure;
   bool _transmitting = false;
   u32_t _unix = 0;
@@ -297,6 +320,7 @@ private:
     _device[F("device_id")] = _deviceId;
     _device[F("device_name")] = _deviceName;
     _device[F("group_name")] = _deviceGroup;
+    _device[F("firmware_version")] = _firmwareVersion;
     _deviceSensors = _device[F("sensors")].to<JsonArray>();
   }
   void _updateSensors()
@@ -324,9 +348,9 @@ private:
   }
   bool _sendData(const String &payload)
   {
-    static int retries = 0;
+    static char retries = 0;
     DL_printf("Sending data try: %i\n", retries);
-    _http->begin(_url);
+    _http->begin(_logUrl);
     _http->addHeader(F("Content-Type"), F("application/json"));
     _http->addHeader(F("Authorization"), _apiKey);
     _resetJSON();
@@ -338,6 +362,11 @@ private:
       retries = 0;
       if (millis() - _lastUnix > ONE_DAY)
         _syncTime();
+      String response = _http->getString();
+      DL_printf("Response: %s\n", response.c_str());
+      JsonDocument doc;
+      deserializeJson(doc, response);
+      handleNotice(doc);
       _http->end();
       return true;
     }
@@ -356,10 +385,58 @@ private:
       }
     }
   }
+  void handleNotice(JsonDocument &doc)
+  {
+    if (doc[F("notice")] == F("update required"))
+    {
+      DL_println("Update required");
+      String url = doc[F("firmware_path")];
+      _updateFirmware(_url + url);
+    }
+  }
+  bool _updateFirmware(const String &url_arg = "")
+  {
+    String url = url_arg;
+    if (url_arg == "")
+    {
+      url = UPDATE_URL(_deviceId);
+    }
+    DL_printf("Updating firmware from: %s\n", url.c_str());
+    _http->begin(url);
+    _http->addHeader(F("Authorization"), _apiKey);
+
+    DL_println("Updating firmware");
+    if (_update_started)
+      httpUpdate.onStart(_update_started);
+    if (_update_finished)
+      httpUpdate.onEnd(_update_finished);
+    t_httpUpdate_return ret = httpUpdate.update(*_http);
+
+    switch (ret)
+    {
+    case HTTP_UPDATE_FAILED:
+      DL_printf("HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+      return false;
+      break;
+
+    case HTTP_UPDATE_NO_UPDATES:
+      DL_println("HTTP_UPDATE_NO_UPDATES");
+      return false;
+      break;
+
+    case HTTP_UPDATE_OK:
+      DL_println("HTTP_UPDATE_OK");
+      return true;
+      break;
+    default:
+      return false;
+      break;
+    }
+  }
   bool _syncTime()
   {
     // If WiFi mode is set to AP return false
-    if (WiFi.getMode() == WIFI_AP)
+    if (WiFi.getMode() == WIFI_AP || WiFi.status() != WL_CONNECTED)
     {
       return false;
     }
@@ -387,6 +464,7 @@ private:
       _lastUnix = millis();
       _lastLog = _unix;
       _lastSensorRead = _unix;
+      handleNotice(doc);
       _http->end();
       return true;
     }
@@ -400,17 +478,21 @@ private:
   {
     if (_secure)
     {
-      _url = F("https://");
-      _url += url + F("/api/v1/log");
+      _logUrl = F("https://");
+      _logUrl += url + F("/api/v1/log");
       _timeUrl = F("https://");
       _timeUrl += url + TIME_PATH;
+      _url = F("https://");
+      _url += url;
     }
     else
     {
-      _url = F("http://");
-      _url += url + F("/api/v1/log");
+      _logUrl = F("http://");
+      _logUrl += url + F("/api/v1/log");
       _timeUrl = F("http://");
       _timeUrl += url + TIME_PATH;
+      _url = F("http://");
+      _url += url;
     }
   }
 };
