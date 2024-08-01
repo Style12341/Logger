@@ -439,8 +439,8 @@ private:
   }
   bool _sendStatus(const String &payload)
   {
-    D_println("Sending status");
-    D_printf("Connecting to: %s\n", _statusUrl.c_str());
+    DL_println("Sending status");
+    DL_printf("Connecting to: %s\n", _statusUrl.c_str());
     _http->begin(_statusUrl);
     _http->addHeader(F("Content-Type"), F("application/json"));
     _http->addHeader(F("Authorization"), _apiKey);
