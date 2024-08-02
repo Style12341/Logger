@@ -399,8 +399,8 @@ private:
     if (doc[F("notice")] == F("update required"))
     {
       DL_println("Update required");
-      String firmware_number = doc[F("firmware_number")];
-      _updateFirmware(_downloadUrl + firmware_number);
+      String firmware_id = doc[F("firmware_id")];
+      _updateFirmware(_downloadUrl + firmware_id);
     }
   }
   bool _updateFirmware(const String &downloadUrl = "")
