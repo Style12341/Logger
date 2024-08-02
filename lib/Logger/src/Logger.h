@@ -383,10 +383,17 @@ private:
       if (retries < 3)
       {
         retries++;
+        delay(5);
         return _sendData(payload);
       }
       else
       {
+        if (httpCode == -1 and _http)
+        {
+          _http->end();
+          delete _http;
+          _http = new HTTPClient;
+        }
         retries = 0;
         return false;
       }
@@ -451,6 +458,12 @@ private:
       _http->end();
       return true;
     }
+    else if (httpCode == -1 and _http)
+    {
+      _http->end();
+      delete _http;
+      _http = new HTTPClient;
+    }
     else
     {
       _http->end();
@@ -498,6 +511,12 @@ private:
       _lastSensorRead = _unix;
       _http->end();
       return true;
+    }
+    else if (httpCode == -1 and _http)
+    {
+      _http->end();
+      delete _http;
+      _http = new HTTPClient;
     }
     else
     {
