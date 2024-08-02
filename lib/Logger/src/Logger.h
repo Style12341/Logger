@@ -458,15 +458,14 @@ private:
       _http->end();
       return true;
     }
-    else if (httpCode == -1 and _http)
-    {
-      _http->end();
-      delete _http;
-      _http = new HTTPClient;
-    }
     else
     {
       _http->end();
+      if (httpCode == -1 and _http)
+      {
+        delete _http;
+        _http = new HTTPClient;
+      }
       return false;
     }
   }
@@ -512,15 +511,14 @@ private:
       _http->end();
       return true;
     }
-    else if (httpCode == -1 and _http)
-    {
-      _http->end();
-      delete _http;
-      _http = new HTTPClient;
-    }
     else
     {
       _http->end();
+      if (httpCode == -1 and _http)
+      {
+        delete _http;
+        _http = new HTTPClient;
+      }
       return false;
     }
   }
