@@ -289,17 +289,15 @@ public:
   }
   void setOnUpdate(void (*callback)())
   {
-    _update_started = callback;
+    httpUpdate.onStart(callback);
   }
   void setOnUpdateFinished(void (*callback)())
   {
-    _update_finished = callback;
+    httpUpdate.onEnd(callback);
   }
 
 private:
   Sensor *_sensors[NumSensors];
-  void (*_update_started)() = nullptr;
-  void (*_update_finished)() = nullptr;
   JsonDocument _device;
   JsonArray _deviceSensors;
   u64_t _deviceId;
@@ -410,10 +408,6 @@ private:
     _http->addHeader(F("Authorization"), _apiKey);
 
     DL_println("Updating firmware");
-    if (_update_started)
-      httpUpdate.onStart(_update_started);
-    if (_update_finished)
-      httpUpdate.onEnd(_update_finished);
     t_httpUpdate_return ret = httpUpdate.update(*_http);
 
     switch (ret)
