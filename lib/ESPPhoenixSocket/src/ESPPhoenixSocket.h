@@ -3,25 +3,24 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
-#include "mbedtls/base64.h"
 #include <ArduinoJson.h>
-#include <functional>
-#include <memory>
 
+constexpr const char *MESSAGE_STRING = "{\"topic\":\"%s\",\"event\":\"%s\",\"ref\":\"%u\",\"payload\":\"%s\"}";
 class PhoenixSocket
 {
 public:
   // Modern callback types using std::function
   using ConnectCallback = std::function<void()>;
   using ErrorCallback = std::function<void(const String &)>;
-  using CloseCallback = std::function<void(uint16_t)>;
-  using MessageCallback = std::function<void(const String &, const String &, const JsonObject &)>;
+  using DisconnectCallback = std::function<void(uint16_t)>;
+  using MessageCallback = std::function<void(const String &, const String &, const JsonDocument)>;
+  using ReplyCallback = std::function<void(const String &, const String &, const JsonDocument)>;
 
   // Constructor using const references for strings
   PhoenixSocket(const String &server, uint16_t port, const String &path)
       : _server(server), _port(port), _path(path), _ref_counter(0)
   {
-    instance_ = this;
+    _instance = this;
   }
 
   // Rule of five (C++11 version)
@@ -34,32 +33,39 @@ public:
   void begin()
   {
     _webSocket.begin(_server.c_str(), _port, _path.c_str());
-    _webSocket.onEvent(webSocketEvent);
+    _webSocket.onEvent(_webSocketEvent);
     _webSocket.setReconnectInterval(5000);
-    _webSocket.enableHeartbeat(15000, 3000, 2);
   }
-
+  bool isConnected()
+  {
+    return _webSocket.isConnected();
+  }
   void loop()
   {
     _webSocket.loop();
+    if (millis() % 30000 == 0)
+    {
+      _sendHeartbeat();
+    }
   }
 
   // Method signatures using const references
-  void joinChannel(const String &topic, const String &payload)
+  uint32_t joinChannel(const String &topic, const String &payload)
   {
-    sendJoinMessage(topic, payload);
+    return _sendJoinMessage(topic, payload);
   }
 
-  void sendEvent(const String &topic, const String &event, const String &payload)
+  void sendEvent(const String &topic, const String &event, const String &payload = "")
   {
-    sendJsonMessage(topic, event, payload);
+    _sendJsonMessage(topic, event, payload);
   }
 
   // Callback setters
   void onConnect(ConnectCallback callback) { _onConnectCallback = std::move(callback); }
   void onError(ErrorCallback callback) { _onErrorCallback = std::move(callback); }
-  void onClose(CloseCallback callback) { _onCloseCallback = std::move(callback); }
+  void onClose(DisconnectCallback callback) { _onDisconnectCallback = std::move(callback); }
   void onMessage(MessageCallback callback) { _onMessageCallback = std::move(callback); }
+  void onReply(ReplyCallback callback) { _onReplyCallback = std::move(callback); }
 
 private:
   WebSocketsClient _webSocket;
@@ -70,43 +76,44 @@ private:
 
   ConnectCallback _onConnectCallback;
   ErrorCallback _onErrorCallback;
-  CloseCallback _onCloseCallback;
+  DisconnectCallback _onDisconnectCallback;
   MessageCallback _onMessageCallback;
+  ReplyCallback _onReplyCallback;
 
-  static PhoenixSocket *instance_;
+  static PhoenixSocket *_instance;
 
-  static void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
+  static void _webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
   {
-    if (!instance_)
+    if (!_instance)
       return;
-    instance_->handleWebSocketEvent(type, payload, length);
+    _instance->_handleWebSocketEvent(type, payload, length);
   }
 
-  void handleWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
+  void _handleWebSocketEvent(WStype_t type, uint8_t *payload, size_t length)
   {
     switch (type)
     {
     case WStype_DISCONNECTED:
-      if (_onCloseCallback)
-        _onCloseCallback(1000);
+      if (_onDisconnectCallback)
+        _onDisconnectCallback(1000);
       break;
     case WStype_CONNECTED:
       if (_onConnectCallback)
         _onConnectCallback();
       break;
     case WStype_TEXT:
-      handleIncomingMessage(reinterpret_cast<char *>(payload));
+      _handleIncomingMessage(reinterpret_cast<char *>(payload));
       break;
     case WStype_ERROR:
       if (_onErrorCallback)
-        _onErrorCallback("WebSocket error occurred");
+        _onErrorCallback("Websocket error");
       break;
     default:
       break;
     }
   }
 
-  void handleIncomingMessage(const char *payload)
+  void _handleIncomingMessage(const char *payload)
   {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
@@ -124,29 +131,53 @@ private:
     const char *event = doc["event"];
     JsonObject messagePayload = doc["payload"];
 
-    if (_onMessageCallback && topic && event && strcmp(event, "phx_reply") != 0)
+    if (_onMessageCallback && topic && event)
     {
-      _onMessageCallback(String(topic), String(event), messagePayload);
+      if (strcmp(event, "phx_reply") == 0)
+      {
+        _onReplyCallback(String(topic), String(event), messagePayload);
+      }
+      else
+      {
+        _onMessageCallback(String(topic), String(event), messagePayload);
+      }
     }
   }
 
-  void sendJoinMessage(const String &topic, const String &payload)
+  uint32_t _sendJoinMessage(const String &topic, const String &payload)
   {
     char message[1024];
-    snprintf(message, sizeof(message), "{\"topic\":\"%s\",\"event\":\"phx_join\",\"ref\":\"%u\",\"payload\":%s}", topic.c_str(), getNextRef(), payload.c_str());
+    uint32_t ref = encodeMessageString(message, sizeof(message), topic.c_str(), "phx_join", payload.c_str());
     _webSocket.sendTXT(message);
+    return ref;
   }
-
-  void sendJsonMessage(const String &topic, const String &event, const String &payload)
+  // Returns message ref
+  uint32_t _sendJsonMessage(const String &topic, const String &event, const String &payload)
   {
     char message[1024];
-    snprintf(message, sizeof(message), "{\"topic\":\"%s\",\"event\":\"%s\",\"ref\":\"%u\",\"payload\":%s}", topic.c_str(), event.c_str(), getNextRef(), payload.c_str());
-
+    uint32_t ref = encodeMessageString(message, sizeof(message), topic.c_str(), event.c_str(), payload.c_str());
     _webSocket.sendTXT(message);
+    return ref;
   }
 
-  uint32_t getNextRef()
+  void _sendHeartbeat()
+  {
+    char message[128];
+    encodeMessageString(message, sizeof(message), "phoenix", "heartbeat", "{}");
+    _webSocket.sendTXT(message);
+  }
+  uint32_t encodeMessageString(char *buffer, const uint16_t length, const char *topic, const char *event, const char *payload)
+  {
+    uint32_t ref = _getNextRef();
+    if (strlen(payload) == 0)
+      snprintf(buffer, length, MESSAGE_STRING, topic, event, ref, "{}");
+    else
+      snprintf(buffer, length, MESSAGE_STRING, topic, event, ref, payload);
+    return ref;
+  }
+  uint32_t _getNextRef()
   {
     return ++_ref_counter;
   }
 };
+PhoenixSocket *PhoenixSocket::_instance = nullptr;
