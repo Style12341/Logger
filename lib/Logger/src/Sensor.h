@@ -2,11 +2,6 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-// Remove unused includes to reduce compile time and binary size
-// #include <WiFi.h>
-// #include <HTTPClient.h>
-// #include <HTTPUpdate.h>
-// #include <WiFiClientSecure.h>
 #include "Logger.h"
 #ifdef DEBUG_LOGGER
 #define DL_LOG(format, ...) Serial.printf(format "\n", ##__VA_ARGS__)
@@ -25,16 +20,16 @@ public:
   Sensor(const String &name = "",
          const String &unit = "",
          const String &type = "",
-         ReadSensorCallback callback = nullptr)
+         ReadSensorCallback callback = nullptr, const uint64_t &id = -1)
       : _name(name), _unit(unit), _type(type), _callback(callback), _value(0.0f)
   {
     // Use StaticJsonDocument for small JSON objects
+    setId(id);
     _sensor[F("name")] = _name;
     _sensor[F("unit")] = _unit;
-    _sensor[F("sensor_type")] = _type;
+    _sensor[F("type")] = _type;
   }
 
-  // Mark methods that don't modify class state as const
   [[nodiscard]] float getValue()
   {
     DL_LOG("Getting value for sensor: %s", _name.c_str());
@@ -48,7 +43,6 @@ public:
     return 0.0f;
   }
 
-  // Use string_view for better string handling performance
   [[nodiscard]] String diagnostic() const
   {
     String output;
@@ -61,40 +55,45 @@ public:
     return output;
   }
 
+  void setId(const uint64_t &id)
+  {
+    if (id != -1)
+    {
+      _sensor[F("id")] = id;
+    }
+    _id = id;
+  }
   // Getter methods marked as const and nodiscard
   [[nodiscard]] const String &getName() const { return _name; }
   [[nodiscard]] const String &getUnit() const { return _unit; }
   [[nodiscard]] const String &getType() const { return _type; }
+  [[nodiscard]] const String &getId() const { return _id; }
 
 protected:
   template <int NumSensors>
   friend class ESPLogger;
 
-  void run(uint32_t timestamp = 0)
+  float run(uint32_t timestamp = 0)
   { // Use uint32_t instead of u32_t for standard types
     _value = getValue();
-
-    JsonDocument sensorValue; // Use StaticJsonDocument with size limit
-    sensorValue[F("value")] = _value;
-    sensorValue[F("timestamp")] = timestamp;
-    _sensorValues.add(sensorValue);
+    _lastRead = timestamp;
+    return _value;
   }
 
   [[nodiscard]] JsonDocument getJson()
   {
     JsonDocument doc = _sensor;
-    doc[F("sensor_values")] = _sensorValues;
-    _sensorValues.clear();
     return doc;
   }
 
 private:
   // Organize member variables by size for better memory alignment
   ReadSensorCallback _callback;
-  JsonDocument _sensor;       // Use StaticJsonDocument with fixed size
-  JsonDocument _sensorValues; // Adjust size based on your needs
+  JsonDocument _sensor; // Use StaticJsonDocument with fixed size
   String _name;
   String _unit;
   String _type;
+  String _id;
   float _value;
+  uint32_t _lastRead;
 };

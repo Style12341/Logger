@@ -6,6 +6,7 @@
 #endif
 
 // Debug logging macros
+#define DEBUG_LOGGER
 #ifdef DEBUG_LOGGER
 #define DL_LOG(format, ...) Serial.printf(format "\n", ##__VA_ARGS__)
 #define DL_SerialBegin(args...) Serial.begin(args)
@@ -15,11 +16,8 @@
 #endif
 
 // Constants
-constexpr const char *SERVER_URL = "esplogger.tech";
-constexpr const char *API_SUFFIX = "/api/v1";
-constexpr const char *LOG_PATH = "/log";
-constexpr const char *TIME_PATH = "/time";
-constexpr const char *FIRMWARE_PATH = "/firmwares/download/";
+constexpr const char *SERVER_URL_L = "esplogger.tech";
+constexpr const char *API_SUFFIX_L = "/socket/api/v1";
 
 // Time constants
 constexpr uint32_t MAX_INTERVAL = 3600;
@@ -36,31 +34,23 @@ class ESPLogger;
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include <ESPPhoenixSocket.h>
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include "Sensor.h"
+#include "LoggerClient.h"
 
 template <int NumSensors>
 class ESPLogger
 {
 public:
   // Constructor with member initializer list
-  explicit ESPLogger(bool secure = true, const String &url = SERVER_URL)
-      : _secure(secure), _deviceId(ESP.getEfuseMac()), _transmitting(false), _unix(0), _lastUnix(0), _sensorIntervalOffset(0), _lastSensorTimeStamp(0), _lastSensorRead(0), _lastLog(0)
+  explicit ESPLogger(bool secure = true, const String &url = SERVER_URL_L)
+      : _secure(secure), _deviceId(ESP.getEfuseMac()), _transmitting(false), _serverUrl(url), _lastUnix(0), _sensorIntervalOffset(0), _lastSensorTimeStamp(0), _lastSensorRead(0)
   {
     // Pre-allocate string buffers
     _apiKey.reserve(40);
-    _logUrl.reserve(40);
-    _timeUrl.reserve(40);
-    _downloadUrl.reserve(40);
-    _statusUrl.reserve(60);
-
-    _http = new HTTPClient;
-
     // Initialize device JSON
-    _device[F("device_id")] = _deviceId;
-    _setUrl(url);
     setFirmwareVersion(FIRMWARE_VERSION);
     setGroup(F("Default"));
     setDeviceName(F("ESP32"));
@@ -70,67 +60,43 @@ public:
   // Destructor to clean up resources
   ~ESPLogger()
   {
-    if (_http)
+    if (_socket)
     {
-      delete _http;
-      _http = nullptr;
+      delete _socket;
+      _socket = nullptr;
     }
   }
 
-  bool init(const String &api_key,
+  void init(const String &api_key,
             const String &deviceName = F("ESP32"),
             const String &group = F("Default"),
             const String &firmwareVersion = FIRMWARE_VERSION,
-            uint32_t sensorReadInterval = 30,
-            uint32_t logInterval = 60)
+            uint32_t sensorReadInterval = 30)
   {
     setFirmwareVersion(firmwareVersion);
     setDeviceName(deviceName);
     setGroup(group);
-    _apiKey = "Bearer " + api_key;
-    setLogInterval(logInterval);
+    setApiKey(api_key);
     setSensorReadInterval(sensorReadInterval);
+    _addSensorMetadata();
+    _client = new LoggerClient(_apiKey, _serverUrl);
+    _client->setAfterJoinCallback([this](const int64_t group_id, JsonDocument sensor_ids)
+                                  { _setIds(group_id, sensor_ids); });
     start();
-
     String payload;
     serializeJson(_device, payload);
-    return _sendStatus(payload);
+    _client->joinChannel(payload);
   }
 
   bool tick()
   {
     if (!_transmitting || !getUnix())
     {
-      if (!getUnix())
-        _syncTime();
       return false;
     }
 
-    _updateSensors();
-
-    if (getUnix() - _lastLog > _logInterval)
-    {
-      _lastLog = getUnix();
-      DL_LOG("Logging data");
-
-      for (int i = 0; i < NumSensors; i++)
-      {
-        if (_sensors[i])
-        {
-          _deviceSensors.add(_sensors[i]->getJson());
-        }
-      }
-
-      String payload;
-      serializeJson(_device, payload);
-
-      if (_sendData(payload))
-      {
-        _lastLog = getUnix();
-        return true;
-      }
-    }
-    return false;
+    _tickSensors();
+    return true;
   }
 
   [[nodiscard]] String sensorsDiagnostic() const
@@ -170,324 +136,144 @@ public:
   // Setters with validation
   void setSensorReadInterval(uint32_t interval)
   {
-    _sensorReadInterval = constrain(interval, MIN_SENSOR_INTERVAL, MAX_SENSOR_INTERVAL);
-  }
-
-  void setLogInterval(uint32_t interval)
-  {
-    _logInterval = constrain(interval, MIN_INTERVAL, MAX_INTERVAL);
+    _sensorReadInterval = constrain(interval, MIN_SENSOR_INTERVAL, MAX_SENSOR_INTERVAL) * 1000;
   }
 
   // Const getters
   [[nodiscard]] uint32_t getSensorReadInterval() const { return _sensorReadInterval; }
-  [[nodiscard]] uint32_t getLogInterval() const { return _logInterval; }
   [[nodiscard]] const String &getFirmwareVersion() const { return _firmwareVersion; }
 
+  void setApiKey(const String &key)
+  {
+    _device[F("api_token")] = key;
+  }
   void setFirmwareVersion(const String &version)
   {
-    _device[F("firmware_version")] = version;
+    _device[F("device")][F("firmware_version")] = version;
     _firmwareVersion = version;
   }
 
   void setDeviceName(const String &name)
   {
-    _device[F("device_name")] = name;
+    _device[F("device")][F("name")] = name;
     _deviceName = name;
   }
 
-  void setGroup(const String &group)
+  void setGroup(const String &group, const int groupId = -1)
   {
-    _device[F("group_name")] = group;
+    _device[F("group")][F("name")] = group;
+    if (groupId != -1)
+      _device[F("group")][F("id")] = groupId;
     _deviceGroup = group;
   }
 
   [[nodiscard]] uint32_t getUnix()
   {
-    if (_unix)
-    {
-      uint32_t diff = millis() - _lastUnix;
-      if (diff > ONE_DAY)
-      {
-        _unix += diff / 1000UL;
-        _lastUnix = millis() - (diff % 1000UL);
-      }
-      return (_unix + (millis() - _lastUnix) / 1000UL);
-    }
-    return 0;
+    return _client->getUnix();
   }
 
   // Control methods
   void setTransmitting(bool state) { _transmitting = state; }
   void stop() { _transmitting = false; }
-
   void start()
   {
-    _lastLog = getUnix();
-    _lastSensorRead = getUnix();
+    _lastSensorRead = millis();
     _transmitting = true;
   }
-
-  // Update callbacks
-  void setOnUpdate(void (*callback)()) { httpUpdate.onStart(callback); }
-  void setOnUpdateFinished(void (*callback)()) { httpUpdate.onEnd(callback); }
 
 private:
   // Private member variables organized by size and type
   Sensor *_sensors[NumSensors] = {};
   JsonDocument _device; // Adjust size as needed
   JsonArray _deviceSensors;
-  HTTPClient *_http;
+  PhoenixSocket *_socket;
+  LoggerClient *_client;
 
   // Device identification
   uint64_t _deviceId;
   String _deviceGroup;
+  uint64_t _groupId;
   String _deviceName;
   String _firmwareVersion;
 
   // URLs and authentication
-  String _logUrl;
-  String _timeUrl;
-  String _downloadUrl;
-  String _statusUrl;
+  String _serverUrl;
   String _apiKey;
 
   // State variables
   bool _secure;
   bool _transmitting;
-  uint32_t _unix;
   uint32_t _lastUnix;
-  uint32_t _logInterval;
   uint32_t _sensorReadInterval;
   uint32_t _lastSensorTimeStamp;
   uint32_t _lastSensorRead;
-  uint32_t _lastLog;
   uint16_t _sensorIntervalOffset;
 
   // Private methods
-  void _resetJSON()
+  void _setIds(const int64_t group_id, JsonDocument sensor_ids)
   {
-    _deviceSensors.clear();
-    _device.clear();
-    _device[F("device_id")] = _deviceId;
-    _device[F("device_name")] = _deviceName;
-    _device[F("group_name")] = _deviceGroup;
-    _device[F("firmware_version")] = _firmwareVersion;
-    _deviceSensors = _device[F("sensors")].to<JsonArray>();
-  }
-
-  void _updateSensors()
-  {
-    if (getUnix() - _lastSensorRead <= _sensorReadInterval - _sensorIntervalOffset)
-    {
-      return;
-    }
-
-    DL_LOG("Reading sensor values");
-    uint32_t timestamp = getUnix();
-
-    if (_lastSensorTimeStamp)
-    {
-      int diff = static_cast<int>(timestamp - _lastSensorTimeStamp) -
-                 static_cast<int>(_sensorReadInterval);
-      _sensorIntervalOffset = constrain(diff, 0, 5);
-    }
-
-    DL_LOG("Reading sensors on Timestamp: %u", timestamp);
-
+    _groupId = group_id;
     for (int i = 0; i < NumSensors; i++)
     {
       if (_sensors[i])
       {
-        _sensors[i]->run(timestamp);
+        _sensors[i]->setId((uint64_t)sensor_ids[i]);
+      }
+    }
+  }
+  void _addSensorMetadata()
+  {
+    for (int i = 0; i < NumSensors; i++)
+    {
+      if (_sensors[i])
+      {
+        _deviceSensors.add(_sensors[i]->getJson());
+      }
+    }
+  }
+
+  void _resetJSON()
+  {
+    _deviceSensors.clear();
+    _device.clear();
+    setApiKey(_apiKey);
+    setDeviceName(_deviceName);
+    setFirmwareVersion(_firmwareVersion);
+    setGroup(_deviceGroup);
+    _deviceSensors = _device[F("sensors")].to<JsonArray>();
+    _addSensorMetadata();
+  }
+
+  void _tickSensors()
+  {
+    if (millis() - _lastSensorRead <= _sensorReadInterval)
+    {
+      return;
+    }
+    static float sensorValues[NumSensors] = {};
+
+    DL_LOG("Reading sensor values");
+    uint32_t timestamp = getUnix();
+    for (int i = 0; i < NumSensors; i++)
+    {
+      if (_sensors[i])
+      {
+        sensorValues[i] = _sensors[i]->run();
       }
     }
 
     _lastSensorTimeStamp = timestamp;
-    _lastSensorRead = getUnix();
+    _lastSensorRead = millis();
   }
-
-  [[nodiscard]] bool _sendData(const String &payload)
+  void _dispatchSensorValues(float values[NumSensors])
   {
-    static uint8_t retries = 0;
-    DL_LOG("Sending data try: %u", retries);
-
-    _http->begin(_logUrl);
-    _http->addHeader(F("Content-Type"), F("application/json"));
-    _http->addHeader(F("Authorization"), _apiKey);
-    _resetJSON();
-
-    int httpCode = _http->POST(payload);
-    DL_LOG("Send data HTTP Code: %d", httpCode);
-
-    if (httpCode == 201)
+    DL_LOG("Dispatching sensor values");
+    for (int i = 0; i < NumSensors; i++)
     {
-      retries = 0;
-      if (millis() - _lastUnix > ONE_DAY)
+      if (_sensors[i])
       {
-        _syncTime();
+        _client->sendSensorData(values[i], _sensors[i]->getId());
       }
-
-      String response = _http->getString();
-      DL_LOG("Response: %s", response.c_str());
-
-      JsonDocument doc;
-      deserializeJson(doc, response);
-      handleNotice(doc);
-
-      _http->end();
-      return true;
     }
-
-    _http->end();
-
-    if (retries < 3)
-    {
-      retries++;
-      delay(5);
-      return _sendData(payload);
-    }
-
-    if (httpCode == -1 && _http)
-    {
-      delete _http;
-      _http = new HTTPClient;
-    }
-
-    retries = 0;
-    return false;
-  }
-
-  void handleNotice(const JsonDocument &doc)
-  {
-    if (doc[F("notice")] == F("update required"))
-    {
-      DL_LOG("Update required");
-      String firmware_id = doc[F("firmware_id")];
-      _updateFirmware(_downloadUrl + firmware_id);
-    }
-  }
-
-  bool _updateFirmware(const String &downloadUrl = "")
-  {
-    DL_LOG("Updating firmware from: %s", downloadUrl.c_str());
-
-    _http->begin(downloadUrl);
-    _http->addHeader(F("Authorization"), _apiKey);
-
-    t_httpUpdate_return ret = httpUpdate.update(*_http);
-
-    switch (ret)
-    {
-    case HTTP_UPDATE_FAILED:
-      DL_LOG("HTTP_UPDATE_FAILED Error (%d): %s",
-             httpUpdate.getLastError(),
-             httpUpdate.getLastErrorString().c_str());
-      return false;
-
-    case HTTP_UPDATE_NO_UPDATES:
-      DL_LOG("HTTP_UPDATE_NO_UPDATES");
-      return false;
-
-    case HTTP_UPDATE_OK:
-      DL_LOG("HTTP_UPDATE_OK");
-      return true;
-
-    default:
-      return false;
-    }
-  }
-  bool _sendStatus(const String &payload)
-  {
-    DL_LOG("Sending status");
-    DL_LOG("Connecting to: %s", _statusUrl.c_str());
-    _http->begin(_statusUrl);
-    _http->addHeader(F("Content-Type"), F("application/json"));
-    _http->addHeader(F("Authorization"), _apiKey);
-    int httpCode = _http->POST(payload);
-    DL_LOG("Send status HTTP Code: %d", httpCode);
-    if (httpCode == 200)
-    {
-      String response = _http->getString();
-      DL_LOG("Response: %s", response.c_str());
-      JsonDocument doc;
-      deserializeJson(doc, response);
-      _syncTime(doc[F("unix_time")]);
-      handleNotice(doc);
-      _http->end();
-      return true;
-    }
-    else
-    {
-      _http->end();
-      if (httpCode == -1 and _http)
-      {
-        delete _http;
-        _http = new HTTPClient;
-      }
-      return false;
-    }
-  }
-  bool _syncTime(const String &unix = "")
-  {
-    if (unix != "")
-    {
-      _unix = unix.toInt();
-      _lastUnix = millis();
-      _lastLog = _unix;
-      _lastSensorRead = _unix;
-      return true;
-    }
-    // If WiFi mode is set to AP return false
-    if (WiFi.getMode() == WIFI_AP || WiFi.status() != WL_CONNECTED)
-    {
-      return false;
-    }
-    DL_LOG("Syncing time");
-    //  WiFiClient client;
-    DL_LOG("Connecting to: %s", _timeUrl.c_str());
-    _http->begin(_timeUrl);
-    DL_LOG("Adding headers");
-    _http->addHeader(F("Content-Type"), F("application/json"));
-    _http->addHeader(F("Authorization"), _apiKey);
-    // Json format -> {unix_time: 123456789}
-
-    int httpCode = _http->GET();
-    DL_LOG("Sync time HTTP Code: %d\n", httpCode);
-    if (httpCode == 200)
-    {
-      String payload = _http->getString();
-
-      DL_LOG("Payload: %s", payload.c_str());
-      JsonDocument doc;
-      DL_LOG("Deserializing");
-      deserializeJson(doc, payload);
-      DL_LOG("Deserialized");
-      _unix = doc[F("unix_time")];
-      _lastUnix = millis();
-      _lastLog = _unix;
-      _lastSensorRead = _unix;
-      _http->end();
-      return true;
-    }
-    else
-    {
-      _http->end();
-      if (httpCode == -1 and _http)
-      {
-        delete _http;
-        _http = new HTTPClient;
-      }
-      return false;
-    }
-  }
-  void _setUrl(const String &url)
-  {
-    String _prefix = F("https://");
-    if (!_secure)
-      _prefix = F("http://");
-    _logUrl = _prefix + url + API_SUFFIX + LOG_PATH;
-    _timeUrl = _prefix + url + API_SUFFIX + TIME_PATH;
-    _downloadUrl = _prefix + url + API_SUFFIX + FIRMWARE_PATH;
-    _statusUrl = _prefix + url + API_SUFFIX + F("/devices/") + String(_deviceId) + F("/status");
   }
 };
