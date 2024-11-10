@@ -1,11 +1,20 @@
 #pragma once
-
+#ifndef ESPPhoenixSocket_h
+#define ESPPhoenixSocket_h
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-
-constexpr const char *MESSAGE_STRING = "{\"topic\":\"%s\",\"event\":\"%s\",\"ref\":\"%u\",\"payload\":\"%s\"}";
+// #define DEBUG_LOGGER
+#ifdef DEBUG_LOGGER
+#define DL_LOG(format, ...) Serial.printf(format "\n", ##__VA_ARGS__)
+#define DL_SerialBegin(args...) Serial.begin(args)
+#else
+#define DL_LOG(...)
+#define DL_SerialBegin(...)
+#endif
+#define RECONNECT_TIME 5000
+constexpr const char *MESSAGE_STRING = "{\"topic\":\"%s\",\"event\":\"%s\",\"ref\":\"%u\",\"payload\":%s}";
 class PhoenixSocket
 {
 public:
@@ -18,8 +27,11 @@ public:
 
   // Constructor using const references for strings
   PhoenixSocket(const String &server, uint16_t port, const String &path)
-      : _server(server), _port(port), _path(path), _ref_counter(0)
   {
+    _server = server;
+    _port = port;
+    _path = path;
+    _ref_counter = 0;
     _instance = this;
   }
 
@@ -32,9 +44,10 @@ public:
 
   void begin()
   {
-    _webSocket.begin(_server.c_str(), _port, _path.c_str());
+    DL_LOG("[ESPPhoenixSocket] Beginning websocket connection %s/%d/%s", _server.c_str(), _port, _path.c_str());
+    _webSocket.begin(_server.c_str(), _port, _path.c_str(), "phoenix");
     _webSocket.onEvent(_webSocketEvent);
-    _webSocket.setReconnectInterval(5000);
+    _webSocket.setReconnectInterval(RECONNECT_TIME);
   }
   bool isConnected()
   {
@@ -45,6 +58,7 @@ public:
     _webSocket.loop();
     if (millis() % 30000 == 0)
     {
+      DL_LOG("[ESPPhoenixSocket] Sending heartbeat");
       _sendHeartbeat();
     }
   }
@@ -52,11 +66,13 @@ public:
   // Method signatures using const references
   uint32_t joinChannel(const String &topic, const String &payload)
   {
+    DL_LOG("[ESPPhoenixSocket] Sending join channel request on:\n\tTopic: %s\n\tPayload %s", topic.c_str(), payload.c_str());
     return _sendJoinMessage(topic, payload);
   }
 
   void sendEvent(const String &topic, const String &event, const String &payload = "")
   {
+    DL_LOG("[ESPPhoenixSocket] Sending event on:\n\tTopic: %s\n\tEvent: %s\n\tPayload %s", topic, event, payload);
     _sendJsonMessage(topic, event, payload);
   }
 
@@ -148,7 +164,9 @@ private:
   {
     char message[1024];
     uint32_t ref = encodeMessageString(message, sizeof(message), topic.c_str(), "phx_join", payload.c_str());
-    _webSocket.sendTXT(message);
+    DL_LOG("[ESPPhoenixSocket] Sending raw message as \n\t\t%s\n", message);
+    bool could = _webSocket.sendTXT(message);
+    DL_LOG("[ESPPhoenixSocket] %d after join message", could);
     return ref;
   }
   // Returns message ref
@@ -156,6 +174,7 @@ private:
   {
     char message[1024];
     uint32_t ref = encodeMessageString(message, sizeof(message), topic.c_str(), event.c_str(), payload.c_str());
+    DL_LOG("[ESPPhoenixSocket] Sending raw message as \n\t\t%s\n", message);
     _webSocket.sendTXT(message);
     return ref;
   }
@@ -181,3 +200,4 @@ private:
   }
 };
 PhoenixSocket *PhoenixSocket::_instance = nullptr;
+#endif
