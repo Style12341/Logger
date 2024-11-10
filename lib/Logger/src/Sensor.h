@@ -1,5 +1,6 @@
 #pragma once // Remove redundant #ifndef SENSOR_H and #define SENSOR_H
-
+#ifndef SENSOR_H
+#define SENSOR_H
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "Logger.h"
@@ -97,3 +98,4 @@ private:
   float _value;
   uint32_t _lastRead;
 };
+#endif
