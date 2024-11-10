@@ -19,6 +19,7 @@
 // Constants
 constexpr const char *SERVER_URL_L = "esplogger.tech";
 constexpr const char *API_SUFFIX_L = "/socket/api/v1/websocket";
+constexpr const uint16_t PORT = 4000;
 
 // Time constants
 constexpr uint32_t MAX_INTERVAL = 3600;
@@ -46,7 +47,7 @@ class ESPLogger
 {
 public:
   // Constructor with member initializer list
-  explicit ESPLogger(const String &url = SERVER_URL_L, const uint32_t &port = PORT)
+  explicit ESPLogger(const String &url = SERVER_URL_L, const uint16_t &port = PORT)
       : _deviceId(ESP.getEfuseMac()), _transmitting(false), _serverUrl(url), _serverPort(port), _lastUnix(0), _sensorIntervalOffset(0), _lastSensorTimeStamp(0), _lastSensorRead(0)
   {
     // Pre-allocate string buffers
@@ -80,7 +81,7 @@ public:
     setApiKey(api_key);
     setSensorReadInterval(sensorReadInterval);
     _addSensorMetadata();
-    _client = new LoggerClient(_deviceId, _apiKey, _serverUrl);
+    _client = new LoggerClient(_deviceId, _apiKey, _serverUrl, _serverPort);
     _client->setAfterJoinCallback([this](const int64_t group_id, JsonDocument sensor_ids)
                                   { _setIds(group_id, sensor_ids); });
     start();
@@ -220,7 +221,7 @@ private:
   // URLs and authentication
   String _serverUrl;
   String _apiKey;
-  uint32_t _serverPort;
+  uint16_t _serverPort;
 
   // State variables
   bool _secure;

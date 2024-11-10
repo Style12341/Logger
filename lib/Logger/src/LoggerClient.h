@@ -19,7 +19,6 @@
 
 // Constants
 #define BASECHANNEL "device:"
-constexpr const uint16_t PORT = 4000;
 constexpr const uint16_t REJOIN_INTERVAL = 5000;
 
 // LoggerClient class to manage communication with the server through PhoenixSocket
@@ -29,7 +28,7 @@ class LoggerClient
   using AfterJoinCallback = std::function<void(const int64_t, JsonDocument)>;
 
 public:
-  explicit LoggerClient(const uint64_t &device_id, const String &api_key, const String &url = SERVER_URL_L, const uint16_t port = PORT)
+  explicit LoggerClient(const uint64_t &device_id, const String &api_key, const String &url, const uint16_t port)
   {
     // Pre-allocate string buffers
     _apiKey.reserve(40);
