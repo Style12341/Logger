@@ -49,6 +49,16 @@ public:
     _webSocket.onEvent(_webSocketEvent);
     _webSocket.setReconnectInterval(RECONNECT_TIME);
   }
+  void beginAuthorized(const String &token)
+  {
+    DL_LOG("[ESPPhoenixSocket] Beginning authorized websocket connection %s/%d/%s", _server.c_str(), _port, _path.c_str());
+    _webSocket.begin(_server.c_str(), _port, _path.c_str(), "phoenix");
+    DL_LOG("[ESPPhoenixSocket] Setting extra headers token: %s", token.c_str());
+    const char *token_c = String("x-token: " + token).c_str();
+    _webSocket.setExtraHeaders(token_c);
+    _webSocket.onEvent(_webSocketEvent);
+    _webSocket.setReconnectInterval(RECONNECT_TIME);
+  }
   bool isConnected()
   {
     return _webSocket.isConnected();

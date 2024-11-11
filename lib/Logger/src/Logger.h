@@ -48,11 +48,12 @@ class ESPLogger
 public:
   // Constructor with member initializer list
   explicit ESPLogger(const String &url = SERVER_URL_L, const uint16_t &port = PORT)
-      : _deviceId(ESP.getEfuseMac()), _transmitting(false), _serverUrl(url), _serverPort(port), _lastUnix(0), _sensorIntervalOffset(0), _lastSensorTimeStamp(0), _lastSensorRead(0)
+      : _transmitting(false), _serverUrl(url), _serverPort(port), _lastUnix(0), _sensorIntervalOffset(0), _lastSensorTimeStamp(0), _lastSensorRead(0)
   {
     // Pre-allocate string buffers
-    _apiKey.reserve(40);
+    _apiKey.reserve(50);
     // Initialize device JSON
+    setDeviceId(ESP.getEfuseMac());
     setFirmwareVersion(FIRMWARE_VERSION);
     setGroup(F("Default"));
     setDeviceName(F("ESP32"));
@@ -81,6 +82,7 @@ public:
     setApiKey(api_key);
     setSensorReadInterval(sensorReadInterval);
     _addSensorMetadata();
+    DL_LOG("[Logger] Starting logger with API key %s", _apiKey.c_str());
     _client = new LoggerClient(_deviceId, _apiKey, _serverUrl, _serverPort);
     _client->setAfterJoinCallback([this](const int64_t group_id, JsonDocument sensor_ids)
                                   { _setIds(group_id, sensor_ids); });
@@ -160,6 +162,7 @@ public:
   void setApiKey(const String &key)
   {
     _device[F("api_token")] = key;
+    _apiKey = key;
   }
   void setFirmwareVersion(const String &version)
   {
@@ -174,7 +177,12 @@ public:
     _device[F("device")][F("name")] = name;
     _deviceName = name;
   }
-
+  void setDeviceId(const uint64_t &id)
+  {
+    DL_LOG("[Logger]Setting device id %d", id);
+    _device[F("device")][F("id")] = id;
+    _deviceId = id;
+  }
   void setGroup(const String &group, const int groupId = -1)
   {
     DL_LOG("[Logger]Setting group name %s", group);

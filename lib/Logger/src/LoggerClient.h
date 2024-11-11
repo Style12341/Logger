@@ -18,11 +18,14 @@
 #endif
 
 // Constants
-#define BASECHANNEL "device:"
+#define BASECHANNEL "devices:"
 constexpr const uint16_t REJOIN_INTERVAL = 5000;
 
 // LoggerClient class to manage communication with the server through PhoenixSocket
-
+String getUserIdFromApiKey(const String &apiKey)
+{
+  return apiKey.substring(0, apiKey.indexOf('_'));
+}
 class LoggerClient
 {
   using AfterJoinCallback = std::function<void(const int64_t, JsonDocument)>;
@@ -31,9 +34,10 @@ public:
   explicit LoggerClient(const uint64_t &device_id, const String &api_key, const String &url, const uint16_t port)
   {
     // Pre-allocate string buffers
-    _apiKey.reserve(40);
+    _apiKey.reserve(50);
     setApiKey(api_key);
-    CHANNEL = BASECHANNEL + String(device_id);
+    CHANNEL = BASECHANNEL + getUserIdFromApiKey(api_key);
+    DL_LOG("[LoggerClient] Initializing client for device: %d", device_id);
     _socket = new PhoenixSocket(url, port, API_SUFFIX_L);
     _socket->onClose([this](uint16_t code)
                      { _channelJoined = false; 
@@ -46,7 +50,8 @@ public:
                      { _handleError(error); });
     _socket->onReply([this](const String &topic, const String &event, const JsonDocument payload)
                      { _handleReply(topic, event, payload); });
-    _socket->begin();
+    DL_LOG("[LoggerClient] Starting socket connection with key %s", _apiKey.c_str());
+    _socket->beginAuthorized(_apiKey);
     _socket->loop();
   }
   void setAfterJoinCallback(AfterJoinCallback callback);
