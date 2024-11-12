@@ -22,7 +22,7 @@
 constexpr const uint16_t REJOIN_INTERVAL = 5000;
 
 // LoggerClient class to manage communication with the server through PhoenixSocket
-String getUserIdFromApiKey(const String &apiKey)
+inline String getUserIdFromApiKey(const String &apiKey)
 {
   return apiKey.substring(0, apiKey.indexOf('_'));
 }
@@ -58,7 +58,7 @@ public:
   void setApiKey(const String &key);
   void joinChannel(const String &payload);
   void sendSensorData(float value, const String &sensorId);
-  void sendSensorData(double value, const String &payload);
+  void sendSensorData(double value, const String &sensorId);
   void sendStatus(const String &payload);
   void tick();
   void setJoinString(const String &joinString);

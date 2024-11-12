@@ -53,10 +53,6 @@ public:
     // Pre-allocate string buffers
     _apiKey.reserve(50);
     // Initialize device JSON
-    setDeviceId(ESP.getEfuseMac());
-    setFirmwareVersion(FIRMWARE_VERSION);
-    setGroup(F("Default"));
-    setDeviceName(F("ESP32"));
     _deviceSensors = _device[F("sensors")].to<JsonArray>();
   }
 
@@ -74,13 +70,15 @@ public:
              const String &deviceName = F("ESP32"),
              const String &group = F("Default"),
              const String &firmwareVersion = FIRMWARE_VERSION,
-             uint32_t sensorReadInterval = 30)
+             uint32_t sensorPollInterval = 30)
   {
+    // Set up private variables and JSON
+    setDeviceId(ESP.getEfuseMac());
     setFirmwareVersion(firmwareVersion);
     setDeviceName(deviceName);
     setGroup(group);
     setApiKey(api_key);
-    setSensorReadInterval(sensorReadInterval);
+    setSensorPollInterval(sensorPollInterval);
     _addSensorMetadata();
     DL_LOG("[Logger] Starting logger with API key %s", _apiKey.c_str());
     _client = new LoggerClient(_deviceId, _apiKey, _serverUrl, _serverPort);
@@ -91,6 +89,7 @@ public:
     serializeJson(_device, payload);
     DL_LOG("[Logger]Join payload\n\t\t%s\n\n", payload.c_str());
     _client->setJoinString(payload);
+    _device.clear();
   }
 
   bool tick()
@@ -149,7 +148,7 @@ public:
   }
 
   // Setters with validation
-  void setSensorReadInterval(uint32_t interval)
+  void setSensorPollInterval(uint32_t interval)
   {
     _sensorReadInterval = constrain(interval, MIN_SENSOR_INTERVAL, MAX_SENSOR_INTERVAL) * 1000;
     DL_LOG("[Logger]Setting sensor read interval to %d", _sensorReadInterval);
