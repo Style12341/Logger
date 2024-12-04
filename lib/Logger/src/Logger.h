@@ -233,6 +233,7 @@ private:
   // State variables
   bool _secure;
   bool _transmitting;
+  bool _hasSentValues = false;
   uint32_t _lastUnix;
   uint32_t _sensorReadInterval;
   uint32_t _lastSensorTimeStamp;
@@ -282,12 +283,11 @@ private:
 
   void _tickSensors()
   {
-    if (millis() - _lastSensorRead <= _sensorReadInterval)
+    if (_hasSentValues && millis() - _lastSensorRead <= _sensorReadInterval)
     {
       return;
     }
     static float sensorValues[NumSensors] = {};
-
     DL_LOG("Reading sensor values");
     uint32_t timestamp = getUnix();
     for (int i = 0; i < NumSensors; i++)
@@ -301,6 +301,7 @@ private:
     _lastSensorRead = millis();
     uint32_t currTime = millis();
     _dispatchSensorValues(sensorValues);
+    _hasSentValues = true;
     uint32_t timeDiff = millis() - currTime;
     Serial.printf("Sensors read and dispatch took %d ms", timeDiff);
     Serial.printf("Average delay between sensor dispatch: %d ms", timeDiff / NumSensors);
